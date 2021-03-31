@@ -5,16 +5,21 @@
 #define _USE_MATH_DEFINES
 
 #include "Torus.h"
-#include <Eigen/Eigenvalues>
 #include <cmath>
 #include <vector>
 #include <fstream>
 #include <boost/math//special_functions/legendre.hpp>
 #include "interp.h"
+#include "tools3bp.h"
 
-
-Torus::Torus(std::pair<stateDict, stateTransDict> &pairSolution){
+Torus::Torus(std::pair<stateDict, stateTransDict> &pairSolution, int N1, int N2, int m, double K):
+        N1(N1), N2(N2), m(m)
+{
     std::cout << "Initializing torus from periodic orbit..." << std::endl;
+
+    if (N2%2 != 0) // check that N2 is even
+        throw std::runtime_error("N2 has to be even!");
+
     // Allocate input data
     stateDict stateEvol = pairSolution.first;
     stateTransDict stateTransEvol = pairSolution.second;
@@ -26,7 +31,7 @@ Torus::Torus(std::pair<stateDict, stateTransDict> &pairSolution){
     this->T = stateEvol.rbegin()->first;    // save period
     Matrix6d monodromyMatrix = stateTransEvol.rbegin()->second;     // find monodromy matrix
 
-    // TODO: Add try catch
+    // Find eigenvalues and eigenvector with QP term
     std::pair<std::complex<double>, Eigen::VectorXcd> eigenQP = findQPEigen(monodromyMatrix);
     std::complex<double> eigenValue = eigenQP.first;
     Eigen::VectorXcd eigenVector = eigenQP.second;
@@ -34,9 +39,9 @@ Torus::Torus(std::pair<stateDict, stateTransDict> &pairSolution){
     this->rho = std::arg(eigenValue) / (2 * M_PI);
 
     // Create invariant circle
-    auto invCircle = createInvariantCircle(eigenVector, 0.001);
+    auto invCircle = createInvariantCircle(eigenVector, K);
     // Propagate invariant circle
-    this->data = propagateInvarianCircle(invCircle, pairSolution, rho);
+    this->data = propagateInvariantCircle(invCircle, pairSolution);
 
     std::cout << "Torus initialized. Transform to collocation form and use a QPSolver to converge." << std::endl;
 }
@@ -44,9 +49,13 @@ Torus::Torus(std::pair<stateDict, stateTransDict> &pairSolution){
 
 void Torus::toCollocationForm()
 {
-    std::map<double, MatrixCircle> torus = this->data;
+    if (torusInCollocation) // avoid double collocation
+        std::cout << "Torus already in collocation form!" << std::endl;
+
+    std::map<double, MatrixCircle> torus = this->data; // retrieve data
+
     // Times where to save new torus are given by Lengendre roots within intervals
-    Eigen::VectorXd legendreRoots = gaussLegendreCollocationArray(N1, m);
+    Eigen::VectorXd legendreRoots = tools3BP::gaussLegendreCollocationArray(N1, m);
     std::map<double, MatrixCircle> torusCol; // allocate solution
     for (const auto &time :legendreRoots)       // initialize solution
         torusCol[time] = MatrixCircle(N2,6);
@@ -61,10 +70,10 @@ void Torus::toCollocationForm()
             int numSet = torus.size();
             std::vector<double> t(numSet), x(numSet);
             int timeNum = 0;
-            for (auto dictCircle = torus.begin(); dictCircle != torus.end(); dictCircle++)
+            for (const auto &dictCircle: torus)
             {
-                t[timeNum] = dictCircle->first;
-                x[timeNum] = dictCircle->second(angleNum,stateNum);
+                t[timeNum] = dictCircle.first;
+                x[timeNum] = dictCircle.second(angleNum,stateNum);
                 timeNum++;
             }
             // Interpolate data
@@ -76,11 +85,32 @@ void Torus::toCollocationForm()
         }
     }
     std::cout << "Torus transformed to collocation form." << std::endl;
+    this->torusInCollocation = true;
     this->data = torusCol;
 }
 
 
-std::pair<std::complex<double>, Eigen::VectorXcd> Torus::findQPEigen(Matrix6d monodromyMatrix)
+void Torus::writeTorus(const std::string& fileName)
+{
+    if (!torusConverged)
+        std::cout << "Warning, the torus is not converged!" << std::endl;
+
+    std::ofstream ofile(fileName, std::ios::out);
+    ofile.precision(16);
+    for (auto const& dictTorus : data)
+    {
+        for (int i = 0; i < N2; i++)
+        {
+            double t = dictTorus.first;
+            Vector6d x = dictTorus.second.row(i);
+            ofile << t << " " << i << " " << x[0] << " " << x[1] << " " << x[2]
+                  << " " << x[3] << " " << x[4] << " " << x[5] << "\n";
+        }
+    }
+}
+
+
+std::pair<std::complex<double>, Eigen::VectorXcd> Torus::findQPEigen(Matrix6d &monodromyMatrix)
 {
     // Initialize eigenvalue/vector solver
     Eigen::EigenSolver<Matrix6d> eigenSolver;
@@ -103,17 +133,17 @@ std::pair<std::complex<double>, Eigen::VectorXcd> Torus::findQPEigen(Matrix6d mo
 }
 
 
-MatrixCircle Torus::createInvariantCircle(const Eigen::VectorXcd &eigenVector, const double K)
+MatrixCircle Torus::createInvariantCircle(const Eigen::VectorXcd &eigenVector, double K) const
 {
     MatrixCircle circleStates(N2,6);
+    std::vector<double> state(6); // allocate state solution
     // Iterate along the circle
     for (int i = 0; i < N2; i++)
     {
-        std::vector<double> state; // allocate state solution
         double angle = double(i)/N2;
         // Iterate on each state
         for (int j = 0; j < 6; j++)
-            state.push_back(K * (eigenVector[j].real() * cos(2 * M_PI * angle) - eigenVector[j].imag() * sin(2 * M_PI * angle)));
+            state[j] = K * (eigenVector[j].real() * cos(2 * M_PI * angle) - eigenVector[j].imag() * sin(2 * M_PI * angle));
         // Save circle state
         circleStates.row(i) << state[0], state[1], state[2], state[3], state[4], state[5];
     }
@@ -121,9 +151,8 @@ MatrixCircle Torus::createInvariantCircle(const Eigen::VectorXcd &eigenVector, c
 }
 
 
-std::map<double, MatrixCircle> Torus::propagateInvarianCircle(const MatrixCircle &invCircle,
-                                                                 const std::pair<stateDict, stateTransDict> &pairSolution,
-                                                                 const double rho)
+std::map<double, MatrixCircle> Torus::propagateInvariantCircle(const MatrixCircle &invCircle,
+                                                               const std::pair<stateDict, stateTransDict> &pairSolution) const
 {
     std::map<double, MatrixCircle> torus; // allocate solution
     const std::complex<double> imagNum(0, 1); // define imaginary number
@@ -153,58 +182,30 @@ std::map<double, MatrixCircle> Torus::propagateInvarianCircle(const MatrixCircle
 }
 
 
-
-
-Eigen::VectorXd Torus::gaussLegendreCollocationArray(int N, int m)
+Torus operator-(Torus &torus, stateDict& stateDict)
 {
-    Eigen::VectorXd collocationArray(N * (m + 1) + 1); // allocate solution
+    if (!torus.torusInCollocation)
+        std::cout << "Warning torus in collocation form, sizes may not match" << std::endl;
 
-    // Generate Legendre zeros
-    std::vector<double> legendreZeros;
-    for (auto & element :boost::math::legendre_p_zeros<double>(m))
+    Torus tanTorus = torus;
+    for (auto p = std::make_pair(tanTorus.data.begin(), stateDict.begin()); p.first != tanTorus.data.end(); ++p.first, ++p.second)
     {
-        if (element == 0) {
-            legendreZeros.push_back(0);
-        }
-        else {
-            legendreZeros.push_back(+element);
-            legendreZeros.push_back(-element);
-        }
+        for (int i = 0; i < tanTorus.N2; i++)
+            tanTorus.data[p.first->first].row(i) -= p.second->second.transpose();
     }
-    sort(legendreZeros.begin(), legendreZeros.end());
-
-    double interValue = 0;
-    for (int i = 0; i <= N; i++)
-    {
-        interValue = double(i) / N;
-        collocationArray[i * (m+1)] = interValue;
-        // Break the last iteration before filling
-        if (interValue == 1.0)
-            break;
-
-        // Fill Legendre roots
-        int j = 1;
-        for (auto & element :legendreZeros)
-        {
-            collocationArray[i * (m+1) + j] = interValue + (element / 2.0 + 0.5) / N;
-            j++;
-        }
-    }
-    return collocationArray;
+    return tanTorus;
 }
 
-void Torus::writeTorus(std::string fileName)
+
+Torus operator-(Torus &torus1, Torus &torus2)
 {
-    std::ofstream ofile(fileName, std::ios::out);
-    for (auto const& dictTorus : data)
-    {
-        for (int i = 0; i < N2; i++)
-        {
-            double t = dictTorus.first;
-            Vector6d x = dictTorus.second.row(i);
-            ofile << t << " " << i << " " << x[0] << " " << x[1] << " " << x[2]
-                << " " << x[3] << " " << x[4] << " " << x[5] << "\n";
-        }
-    }
+    if (torus1.data.size() != torus2.data.size() || torus1.N2 != torus2.N2)
+        throw std::runtime_error("Torus sizes do not match!");
+
+    Torus tanTorus = torus1;
+    for (auto tor1dict = torus1.data.begin(), tor2dict = torus2.data.begin(); tor1dict != torus1.data.end(); tor1dict++, tor2dict++)
+        tanTorus.data[tor1dict->first] = tor1dict->second - tor2dict->second;
+
+    return tanTorus;
 }
 
