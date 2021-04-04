@@ -90,6 +90,18 @@ void Torus::toCollocationForm()
 }
 
 
+Vector6d Torus::getManifoldState(double theta_1, double theta_2, bool invert)   // TODO: assumes that point in grid -> generalize
+{
+    int posAngle  = int(1 / theta_2);
+    Vector6d manifoldState = this->data[theta_1].row(posAngle);
+    if (invert)
+        manifoldState -= this->manifoldData[theta_1].row(posAngle);
+    else
+        manifoldState += this->manifoldData[theta_1].row(posAngle);
+    return manifoldState;
+}
+
+
 void Torus::writeTorus(const std::string& fileName)
 {
     if (!torusConverged)
@@ -184,7 +196,7 @@ std::map<double, MatrixCircle> Torus::propagateInvariantCircle(const MatrixCircl
 
 Torus operator-(Torus &torus, stateDict& stateDict)
 {
-    if (!torus.torusInCollocation)
+    if (torus.torusInCollocation)
         std::cout << "Warning torus in collocation form, sizes may not match" << std::endl;
 
     Torus tanTorus = torus;

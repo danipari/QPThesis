@@ -12,7 +12,8 @@
 #include "tools3bp.h"
 
 
-void QPCollocationSolver::Solve(Torus &torus, Torus &prevTorus, Torus &tanTorus, std::pair<double,double>config, double tol)
+void QPCollocationSolver::Solve(Torus &torus, Torus &prevTorus, Torus &tanTorus,
+                                std::pair<double,double>config, double tol, bool getManifolds)
 {
     // Transform torus data to array
     Eigen::VectorXd torusV = torusToArray(torus);
@@ -52,6 +53,20 @@ void QPCollocationSolver::Solve(Torus &torus, Torus &prevTorus, Torus &tanTorus,
     arrayToTorus(torusV, torus);
     torus.torusConverged = true;
     std::cout << "Torus converged!" << std::endl;
+
+    if (getManifolds)
+    {
+        // Compute the matrix containing all state transition matrices
+        int dimState = 6, dimMatrix = torus.N1 * (torus.m + 1) * torus.N2 * dimState;
+        SparseMatrix matrixA = SparseMatrix(jMatrix.block(0, 0, dimMatrix, torus.N2 * dimState));
+        SparseMatrix matrixB = SparseMatrix(-jMatrix.block(0, torus.N2 * dimState, dimMatrix, dimMatrix));
+        solver.compute(matrixB);
+        SparseMatrix stateTransitionMatrices = solver.solve(matrixA);
+
+        // Fill manifold information
+        findManifolds(torus, stateTransitionMatrices);
+        std::cout << "Manifolds computed!" << std::endl;
+    }
 }
 
 
@@ -89,25 +104,6 @@ void QPCollocationSolver::arrayToTorus(Eigen::VectorXd &array, Torus &torus)
         numTime++;
     }
 }
-
-
-void QPCollocationSolver::printSparseMatrix(SparseMatrix &matrix)
-{
-    int height = matrix.rows(); int width = matrix.cols();
-    std::ofstream ofile("sparseMatrix.dat", std::ios::out);
-    for (int i = 0; i < height; i ++)
-    {
-        for (int j = 0; j < width; j++)
-        {
-            if (matrix.coeffRef(i,j) != 0)
-                ofile << 'x';
-            else
-                ofile << ' ';
-        }
-        ofile << '\n';
-    }
-}
-
 
 Eigen::VectorXd QPCollocationSolver::getCollocationSyst(Eigen::VectorXd &torusV,
                                                         Eigen::VectorXd &prevTorusV,
@@ -268,7 +264,7 @@ SparseMatrix QPCollocationSolver::getCollocationJacobian(Eigen::VectorXd &torusV
 
     // Allocate solution
     SparseMatrix jMatrix(dimVector + scalarEqs, dimVector + scalarEqs);
-    std::vector<Eigen::Triplet<double>> tripletList;
+    std::vector<Eigen::Triplet<float>> tripletList;
     tripletList.reserve(int(N1 * pow((m + 1) * N2 * dimState, 2) + 7 * N1 * (m + 1) * N2 * dimState));
 
     Eigen::VectorXd collocationArray = tools3BP::gaussLegendreCollocationArray(N1, m);
@@ -399,103 +395,63 @@ SparseMatrix QPCollocationSolver::getCollocationJacobian(Eigen::VectorXd &torusV
 }
 
 
-Vector6d QPCollocationSolver::jacobiGradient(Vector6d &state)
+void QPCollocationSolver::findManifolds(Torus &torus, SparseMatrix &stateTransitionMatrices)
 {
-    Vector6d jacobiGradient;
-    double u = massParameter;
-    double x = state[0], y = state[1], z = state[2], dx = state[3], dy = state[4], dz = state[5];
-    double r1 = sqrt(pow((u + x), 2) + y * y + z * z);
-    double r2 = sqrt(pow((1 - u - x), 2) + y * y + z * z);
+    int dimState = 6, N1 = torus.N1, N2 = torus.N2, m = torus.m;
+    int dimMatrix = N1 * (m + 1) * N2 * dimState, dimBlock = N2 * dimState;
+    Eigen::VectorXd collocationArray = tools3BP::gaussLegendreCollocationArray(N1, m);
 
-    double dHx = - 2 * (x + u) * (1 - u) / pow(r1,3) + 2 * (1 - u - x) * u / pow(r2,3) + 2 * x;
-    double dHy = - 2 *       y * (1 - u) / pow(r1,3) - 2 *           y * u / pow(r2,3) + 2 * y;
-    double dHz = - 2 *       z * (1 - u) / pow(r1,3) - 2 *           z * u / pow(r2,3);
-    double dHdx = - 2 * dx;
-    double dHdy = - 2 * dy;
-    double dHdz = - 2 * dz;
+    // Compute rotated monodromy matrix
+    Eigen::MatrixXd monodromyMatrix = stateTransitionMatrices.block(dimMatrix - dimBlock, 0, dimBlock, dimBlock);
+    Eigen::MatrixXd rotMatrix = rotationMatrix(N2, -torus.rho).real();
+    Eigen::MatrixXd linearFixedCircle = expandMatrix(rotMatrix, N2) * monodromyMatrix;
 
-    jacobiGradient << dHx, dHy, dHz, dHdx, dHdy, dHdz;
-    return jacobiGradient;
-}
+    // Find eigenvalues
+    Eigen::EigenSolver<Eigen::MatrixXd> eigenSolver;
+    eigenSolver.compute(linearFixedCircle);
+    Eigen::VectorXcd eigenValues = eigenSolver.eigenvalues();
+    Eigen::MatrixXcd eigenVectors = eigenSolver.eigenvectors();
 
+    // Find the manifold vector
+    double firstManifoldValue;
+    Eigen::VectorXd firstManifoldVector(dimBlock);
+    int indexElement = 0;
+    for (const auto &eigenValue :eigenValues)
+    {
+        if (eigenValue.imag() == 0 && eigenValue.real() > 1.5) // TODO: Do not used hard-coded value
+        {
+            firstManifoldValue = eigenValues[indexElement].real();
+            firstManifoldVector = eigenVectors.col(indexElement).real();
+            break;
+        }
+        indexElement++;
+    }
 
-Matrix6d QPCollocationSolver::getJacobianCR3BP(Vector6d &state)
-{
-    Matrix6d subBlock; subBlock.setZero();
-    double u = massParameter;
-    double x = state[0], y = state[1], z = state[2];
-    double r1 = sqrt(pow((u + x), 2) + y * y + z * z);
-    double r2 = sqrt(pow((1 - u - x), 2) + y * y + z * z);
+    // Propagate the manifold eigenvector
+    Eigen::VectorXd manifoldVector(dimBlock);
+    MatrixCircle manifoldMatrix(N2, dimState);
+    for (int i = 0; i < N1 * (m + 1) + 1; i++)
+    {
+        double time = collocationArray[i];
 
-    subBlock(0,3) = 1;
-    subBlock(1,4) = 1;
-    subBlock(2,5) = 1;
+        if (i == 0 || i == N1 * (m + 1))    // do not propagate first and last eigenvectors
+            manifoldVector = firstManifoldVector;
+        else                 // remove scaling produced by state transition matrix
+            manifoldVector = pow(firstManifoldValue,-i / double(N1 * (m + 1))) *
+                             stateTransitionMatrices.block(i * dimBlock, 0, dimBlock, dimBlock) * firstManifoldVector;
 
-    subBlock(3,0) = 1 + 3 * (1 - u) * pow((x + u),2) / pow(r1,5) - (1 - u) / pow(r1,3) + 3 * u * pow((1 - u - x),2) / pow(r2,5) - u / pow(r2,3);
-    subBlock(3,1) = 3 * (1 - u) * (x + u) * y / pow(r1,5) - 3 * u * (1 - u - x) * y / pow(r2,5);
-    subBlock(3,2) = 3 * (1 - u) * (x + u) * z / pow(r1,5) - 3 * u * (1 - u - x) * z / pow(r2,5);
+        // Transform vector into matrix form
+        for (int j = 0; j < N2; j++)
+            manifoldMatrix.row(j) = manifoldVector.segment(j*dimState, dimState);
 
-    subBlock(4,0) = 3 * (1 - u) * (x + u) * y / pow(r1,5) - 3 * u * (1 - u - x) * y / pow(r2,5);
-    subBlock(4,1) = 1 + 3 * (1 - u) * y * y / pow(r1,5) - (1 - u) / pow(r1,3) + 3 * u * y * y / pow(r2,5) - u / pow(r2,3);
-    subBlock(4,2) = 3 * (1 - u) * y * z / pow(r1,5) + 3 * u * y * z / pow(r2,5);
-
-    subBlock(5,0) = 3 * (1 - u) * (x + u) * z / pow(r1,5) - 3 * u * (1 - u - x) * z / pow(r2,5);
-    subBlock(5,1) = 3 * (1 - u) * y * z / pow(r1,5) + 3 * u * y * z / pow(r2,5);
-    subBlock(5,2) = 3 * (1 - u) * z * z / pow(r1,5) - (1 - u) / pow(r1,3) + 3 * u * z * z / pow(r2,5) - u / pow(r2,3);
-
-    subBlock(3,4) = +2;
-    subBlock(4,3) = -2;
-
-    return subBlock;
+        torus.manifoldData[time] = 1E-5 * manifoldMatrix;  // fill torus information    // TODO: Do not used hard-coded value
+    }
 }
 
 
 Vector6d QPCollocationSolver::modelDynamicCR3BP(Vector6d &state, Vector6d &dxdth2Section, double l1, double l2)
 {
     return dynamicsCR3BP(state) + l1 * jacobiGradient(state) + l2 * i2Gradient(dxdth2Section);
-}
-
-
-double QPCollocationSolver::tauHat(double t, double ti, double tii){ return (t - ti) / (tii - ti); }
-
-
-double QPCollocationSolver::lagrangePoly(double time, double timeSampleK, Eigen::VectorXd &timeSegment)
-{
-    double ti = timeSegment[0];
-    double tii = timeSegment[timeSegment.size()-1];
-
-    double sol = 1;
-    for (const auto &timeJ :timeSegment.head(timeSegment.size()-1))
-    {
-        if (timeJ != timeSampleK)
-            sol *= (tauHat(time, ti, tii) - tauHat(timeJ, ti, tii)) / (tauHat(timeSampleK, ti, tii) - tauHat(timeJ, ti, tii));
-    }
-    return sol;
-}
-
-
-double QPCollocationSolver::lagrangePolyDeriv(double time, double timeSampleK, Eigen::VectorXd &timeSegment)
-{
-    double ti = timeSegment[0];
-    double tii = timeSegment[timeSegment.size()-1];
-
-    double sol1 = 0;
-    for (const auto &timeJ1 :timeSegment.head(timeSegment.size()-1))
-    {
-        if (timeJ1 != timeSampleK)
-        {
-            double sol2 = 1;
-            for (const auto &timeJ2 :timeSegment.head(timeSegment.size()-1))
-            {
-                if (timeJ2 != timeSampleK && timeJ2 != timeJ1)
-                {
-                    sol2 *= (tauHat(time, ti, tii) - tauHat(timeJ2, ti, tii)) / (tauHat(timeSampleK,ti,tii) - tauHat(timeJ2,ti,tii));
-                }
-            }
-            sol1 += sol2 / (tauHat(timeSampleK,ti,tii) - tauHat(timeJ1,ti,tii));
-        }
-    }
-    return sol1;
 }
 
 
@@ -508,25 +464,6 @@ Vector6d QPCollocationSolver::i2Gradient(Vector6d &dxdth2Section)
     matrixJ.block(0,3,3,3) = -Eigen::MatrixXd::Identity(3,3);
     matrixJ.block(3,0,3,3) = Eigen::MatrixXd::Identity(3,3);
     return matrixJ * dxdth2Section;
-}
-
-
-Eigen::MatrixXcd QPCollocationSolver::th2Derivative(int N)
-{
-    Eigen::MatrixXcd shiftMat(N,N);
-    shiftMat.setZero();
-    Eigen::VectorXd kCoeff(N);
-    kCoeff << Eigen::ArrayXd::LinSpaced(int(N/2), 0, int(N/2)-1), 0.0, Eigen::ArrayXd::LinSpaced(int(N/2)-1, int(-N/2)+1, -1);
-
-    int count = 0;
-    for (const auto &k: kCoeff)
-    {
-        shiftMat(count,count) = std::complex<double>(0, k);
-        count++;
-    }
-
-    Eigen::MatrixXcd dftMat = tools3BP::DFT(N), idftMat = tools3BP::IDFT(N);
-    return idftMat * (shiftMat * dftMat);
 }
 
 
@@ -564,21 +501,8 @@ Eigen::MatrixXcd QPCollocationSolver::rotationMatrixDer(int N, double rho)
     return idftMat * (shiftMat * dftMat);
 }
 
-
-Eigen::MatrixXd QPCollocationSolver::expandMatrix(Eigen::MatrixXd &matrix, int N)
-{
-    Eigen::MatrixXd expandedMatrix(N*6, N*6);
-    expandedMatrix.setZero();
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++)
-            expandedMatrix.block(i * 6, j * 6, 6, 6) = Eigen::MatrixXd::Identity(6, 6) * matrix(i,j);
-    }
-    return expandedMatrix;
-}
-
-
 template <class T>
-void QPCollocationSolver::fillSpBlock(std::vector<Eigen::Triplet<double>> &tripletList, const T &block, int row, int col, int height, int width)
+void QPCollocationSolver::fillSpBlock(std::vector<Eigen::Triplet<float>> &tripletList, const T &block, int row, int col, int height, int width)
 {
     for (int i = 0; i < height; i++)
     {
@@ -586,7 +510,7 @@ void QPCollocationSolver::fillSpBlock(std::vector<Eigen::Triplet<double>> &tripl
         {
             double val = block(i,j);
             if (val != 0)
-                tripletList.emplace_back(Eigen::Triplet<double>(row + i, col + j, val));
+                tripletList.emplace_back(Eigen::Triplet<float>(row + i, col + j, val));
         }
     }
 }

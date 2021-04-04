@@ -5,6 +5,7 @@
 #define THESIS_TOOLS3BP_CPP
 
 #include <vector>
+#include <fstream>
 #include <Eigen/Dense>
 #include <Eigen/FFT>
 #include <boost/math//special_functions/legendre.hpp>
@@ -77,6 +78,18 @@ Eigen::MatrixXcd tools3BP::IDFT(int N)
         output.col(k) = fft.inv( input.col(k) );
 
     return output;
+}
+
+
+void tools3BP::writeTrajectory(stateDict &stateDict, const std::string& fileName)
+{
+    std::ofstream ofile(fileName, std::ios::out);
+    for (const auto &stateRow : stateDict)
+    {
+        double time = stateRow.first;
+        Vector6d state = stateRow.second;
+        ofile << time << " " << state[0] << " " << state[1] << " " << state[2] << " " << state[3] << " " << state[4] << " " << state[5] << "\n";
+    }
 }
 
 

@@ -3,6 +3,8 @@
 //
 #include "Solver3BP.h"
 #include <boost/numeric/odeint.hpp>
+#include <fstream>
+#include "tools3bp.h"
 
 
 Solver3BP::Solver3BP(std::string &bodyPrimary, std::string &bodySecondary, double &distanceBodies)
@@ -111,7 +113,7 @@ Matrix6d Solver3BP::stateTransitionDerivative(const std::vector<double> &state, 
     return A * phi;
 }
 
-double Solver3BP::getJacobi(Vector6d &state)
+double Solver3BP::getJacobi(const Vector6d &state)
 {
     double u = massParameter;
     double x = state[0], y = state[1], z = state[2];
@@ -122,4 +124,147 @@ double Solver3BP::getJacobi(Vector6d &state)
     double V = state.segment(3,3).squaredNorm();
 
     return U - V;
+}
+
+
+double Solver3BP::tauHat(double t, double ti, double tii){ return (t - ti) / (tii - ti); }
+
+
+double Solver3BP::lagrangePoly(double time, double timeSampleK, Eigen::VectorXd &timeSegment)
+{
+    double ti = timeSegment[0];
+    double tii = timeSegment[timeSegment.size()-1];
+
+    double sol = 1;
+    for (const auto &timeJ :timeSegment.head(timeSegment.size()-1))
+    {
+        if (timeJ != timeSampleK)
+            sol *= (tauHat(time, ti, tii) - tauHat(timeJ, ti, tii)) / (tauHat(timeSampleK, ti, tii) - tauHat(timeJ, ti, tii));
+    }
+    return sol;
+}
+
+
+double Solver3BP::lagrangePolyDeriv(double time, double timeSampleK, Eigen::VectorXd &timeSegment)
+{
+    double ti = timeSegment[0];
+    double tii = timeSegment[timeSegment.size()-1];
+
+    double sol1 = 0;
+    for (const auto &timeJ1 :timeSegment.head(timeSegment.size()-1))
+    {
+        if (timeJ1 != timeSampleK)
+        {
+            double sol2 = 1;
+            for (const auto &timeJ2 :timeSegment.head(timeSegment.size()-1))
+            {
+                if (timeJ2 != timeSampleK && timeJ2 != timeJ1)
+                {
+                    sol2 *= (tauHat(time, ti, tii) - tauHat(timeJ2, ti, tii)) / (tauHat(timeSampleK,ti,tii) - tauHat(timeJ2,ti,tii));
+                }
+            }
+            sol1 += sol2 / (tauHat(timeSampleK,ti,tii) - tauHat(timeJ1,ti,tii));
+        }
+    }
+    return sol1;
+}
+
+
+Vector6d Solver3BP::jacobiGradient(Vector6d &state)
+{
+    Vector6d jacobiGradient;
+    double u = massParameter;
+    double x = state[0], y = state[1], z = state[2], dx = state[3], dy = state[4], dz = state[5];
+    double r1 = sqrt(pow((u + x), 2) + y * y + z * z);
+    double r2 = sqrt(pow((1 - u - x), 2) + y * y + z * z);
+
+    double dHx = - 2 * (x + u) * (1 - u) / pow(r1,3) + 2 * (1 - u - x) * u / pow(r2,3) + 2 * x;
+    double dHy = - 2 *       y * (1 - u) / pow(r1,3) - 2 *           y * u / pow(r2,3) + 2 * y;
+    double dHz = - 2 *       z * (1 - u) / pow(r1,3) - 2 *           z * u / pow(r2,3);
+    double dHdx = - 2 * dx;
+    double dHdy = - 2 * dy;
+    double dHdz = - 2 * dz;
+
+    jacobiGradient << dHx, dHy, dHz, dHdx, dHdy, dHdz;
+    return jacobiGradient;
+}
+
+
+Eigen::MatrixXd Solver3BP::expandMatrix(Eigen::MatrixXd &matrix, int N)
+{
+    Eigen::MatrixXd expandedMatrix(N*6, N*6);
+    expandedMatrix.setZero();
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++)
+            expandedMatrix.block(i * 6, j * 6, 6, 6) = Eigen::MatrixXd::Identity(6, 6) * matrix(i,j);
+    }
+    return expandedMatrix;
+}
+
+
+Eigen::MatrixXcd Solver3BP::th2Derivative(int N)
+{
+    Eigen::MatrixXcd shiftMat(N,N);
+    shiftMat.setZero();
+    Eigen::VectorXd kCoeff(N);
+    kCoeff << Eigen::ArrayXd::LinSpaced(int(N/2), 0, int(N/2)-1), 0.0, Eigen::ArrayXd::LinSpaced(int(N/2)-1, int(-N/2)+1, -1);
+
+    int count = 0;
+    for (const auto &k: kCoeff)
+    {
+        shiftMat(count,count) = std::complex<double>(0, k);
+        count++;
+    }
+
+    Eigen::MatrixXcd dftMat = tools3BP::DFT(N), idftMat = tools3BP::IDFT(N);
+    return idftMat * (shiftMat * dftMat);
+}
+
+
+Matrix6d Solver3BP::getJacobianCR3BP(Vector6d &state)
+{
+    Matrix6d subBlock; subBlock.setZero();
+    double u = massParameter;
+    double x = state[0], y = state[1], z = state[2];
+    double r1 = sqrt(pow((u + x), 2) + y * y + z * z);
+    double r2 = sqrt(pow((1 - u - x), 2) + y * y + z * z);
+
+    subBlock(0,3) = 1;
+    subBlock(1,4) = 1;
+    subBlock(2,5) = 1;
+
+    subBlock(3,0) = 1 + 3 * (1 - u) * pow((x + u),2) / pow(r1,5) - (1 - u) / pow(r1,3) + 3 * u * pow((1 - u - x),2) / pow(r2,5) - u / pow(r2,3);
+    subBlock(3,1) = 3 * (1 - u) * (x + u) * y / pow(r1,5) - 3 * u * (1 - u - x) * y / pow(r2,5);
+    subBlock(3,2) = 3 * (1 - u) * (x + u) * z / pow(r1,5) - 3 * u * (1 - u - x) * z / pow(r2,5);
+
+    subBlock(4,0) = 3 * (1 - u) * (x + u) * y / pow(r1,5) - 3 * u * (1 - u - x) * y / pow(r2,5);
+    subBlock(4,1) = 1 + 3 * (1 - u) * y * y / pow(r1,5) - (1 - u) / pow(r1,3) + 3 * u * y * y / pow(r2,5) - u / pow(r2,3);
+    subBlock(4,2) = 3 * (1 - u) * y * z / pow(r1,5) + 3 * u * y * z / pow(r2,5);
+
+    subBlock(5,0) = 3 * (1 - u) * (x + u) * z / pow(r1,5) - 3 * u * (1 - u - x) * z / pow(r2,5);
+    subBlock(5,1) = 3 * (1 - u) * y * z / pow(r1,5) + 3 * u * y * z / pow(r2,5);
+    subBlock(5,2) = 3 * (1 - u) * z * z / pow(r1,5) - (1 - u) / pow(r1,3) + 3 * u * z * z / pow(r2,5) - u / pow(r2,3);
+
+    subBlock(3,4) = +2;
+    subBlock(4,3) = -2;
+
+    return subBlock;
+}
+
+
+void Solver3BP::printSparseMatrix(SparseMatrix &matrix)
+{
+    int height = matrix.rows(); int width = matrix.cols();
+    std::ofstream ofile("sparseMatrix.dat", std::ios::out);
+    for (int i = 0; i < height; i ++)
+    {
+        for (int j = 0; j < width; j++)
+        {
+            if (matrix.coeffRef(i,j) != 0)
+                ofile << 'x';
+            else
+                ofile << ' ';
+        }
+        ofile << '\n';
+    }
 }

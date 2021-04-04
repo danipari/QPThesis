@@ -5,6 +5,9 @@
 #ifndef THESIS_TOOLS3BP_H
 #define THESIS_TOOLS3BP_H
 
+typedef Eigen::Matrix<double, 6, 1> Vector6d;
+typedef std::map<double, Vector6d, std::less<>,Eigen::aligned_allocator<std::pair<const double, Vector6d>>> stateDict;
+
 namespace tools3BP {
     /**
      * Creates a list containing N equally spaced element and between these
@@ -20,6 +23,8 @@ namespace tools3BP {
     Eigen::MatrixXcd DFT(int N);
 
     Eigen::MatrixXcd IDFT(int N);
+
+    void writeTrajectory(stateDict &state, const std::string& fileName);
 
 
 }

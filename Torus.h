@@ -22,6 +22,7 @@ public:
     int N1, N2, m;
     double T, rho;
     std::map<double, MatrixCircle> data;
+    std::map<double, MatrixCircle> manifoldData;
     bool torusInCollocation = false;
     bool torusConverged = false;
 
@@ -54,6 +55,8 @@ public:
      * @return A copy of the torus data
      */
     std::map<double, MatrixCircle> getData() const { return data; }
+
+    Vector6d getManifoldState(double theta_1, double theta_2, bool invert=false);  //TODO: Documentation
 
     /**
      * Writes the torus in a file containing the state of each point parameterizing the torus.

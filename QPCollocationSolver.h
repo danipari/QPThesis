@@ -48,7 +48,8 @@ public:
      * @param config Contains the energy level Href and dsRef for the continuation scheme.
      * @param tol Stopping tolerance for convergence.
      */
-    void Solve(Torus &torus, Torus &prevTorus, Torus &tanTorus, std::pair<double,double>config, double tol=1E-8);
+    void Solve(Torus &torus, Torus &prevTorus, Torus &tanTorus,
+               std::pair<double,double>config, double tol=1E-8, bool getManifolds=true);
 
     /**
      * Converts a torus parametrization to an array.
@@ -64,12 +65,7 @@ public:
      */
     static void arrayToTorus(Eigen::VectorXd &array, Torus &torus);
 
-    /**
-     * Debug method used to print a sparse matrix in a file -"sparseMatrix.dat"-
-     * where non-empty element are filled.
-     * @param matrix Sparse matrix to print.
-     */
-    static void printSparseMatrix(SparseMatrix &matrix);
+
 
 private:
 
@@ -107,18 +103,12 @@ private:
                                         std::pair<double,double>config);
 
     /**
-     * Returns the energy gradient.
-     * @param state State at which to compute the gradient.
-     * @return Vector with the gradient.
+     * It computes the manifold vectors at each of the points of the torus.
+     * @param torus Torus to save the manifold data.
+     * @param stateTransitionMatrices Matrix with all the state transition matrices
+     *      in a column.
      */
-    Vector6d jacobiGradient(Vector6d &state);
-
-    /**
-     * Method that returns the Jacobian matrix of the energy equation.
-     * @param state State at which to compute the Jacobian.
-     * @return Matrix with the Jacobian.
-     */
-    Matrix6d getJacobianCR3BP(Vector6d &state);
+    static void findManifolds(Torus &torus, SparseMatrix &stateTransitionMatrices);
 
     /**
      * Method that computes the extended -with unfolding parameters- flow vector.
@@ -131,33 +121,6 @@ private:
     Vector6d modelDynamicCR3BP(Vector6d &state, Vector6d &dxdth2Section, double l1, double l2);
 
     /**
-     * Computes a normalized time.
-     * @param t Time to normalize.
-     * @param ti Smallest time.
-     * @param tii Largest time.
-     * @return Normalized time.
-     */
-    static double tauHat(double t, double ti, double tii);
-
-    /**
-     * Returns the value of the Lagrange polynomial at a time.
-     * @param time Time to compute the Lagrange polynomial.
-     * @param timeSampleK Node of the time segment.
-     * @param timeSegment Time segment to use, note that last element is not included!
-     * @return Value of the Lagrange polynomial.
-     */
-    static double lagrangePoly(double time, double timeSampleK, Eigen::VectorXd &timeSegment);
-
-    /**
-     * Returns the value of the derivative of the Lagrange polynomial at a time.
-     * @param time Time to compute the derivative of the Lagrange polynomial.
-     * @param timeSampleK Node of the time segment.
-     * @param timeSegment Time segment to use, note that last element is not included!
-     * @return Value of the Lagrange polynomial derivative.
-     */
-    static double lagrangePolyDeriv(double time, double timeSampleK, Eigen::VectorXd &timeSegment);
-
-    /**
      * Derivative of I2 used to compute a local constant to have an extra
      * unfolding parameter.
      * @param dxdth2Section Derivative of the state wrt theta_2.
@@ -166,19 +129,12 @@ private:
     static Vector6d i2Gradient(Vector6d &dxdth2Section);
 
     /**
-     * Method to compute the transform matrix to compute derivative wrt theta_2.
-     * @param N Number of element in circle section.
-     * @return Value of the transformation matrix.
-     */
-    static Eigen::MatrixXcd th2Derivative(int N);
-
-    /**
      * Method to compute a rotation matrix using DFT.
      * @param N Number of element in circle section.
      * @param rho Rotating angle [0,1].
      * @return Rotation matrix.
      */
-    static Eigen::MatrixXcd QPCollocationSolver::rotationMatrix(int N, double rho);
+    static Eigen::MatrixXcd rotationMatrix(int N, double rho);
 
     /**
      * Method to compute a rotation matrix derivative using DFT.
@@ -187,14 +143,6 @@ private:
      * @return Rotation matrix derivative.
      */
     static Eigen::MatrixXcd rotationMatrixDer(int N, double rho);
-
-    /**
-     * Method to expand a matrix to match the Jacobian format required.
-     * @param matrix Matrix to expand.
-     * @param N Number of element in circle section.
-     * @return Expanded (N x 6) x (N x 6) matrix.
-     */
-    static Eigen::MatrixXd expandMatrix(Eigen::MatrixXd &matrix, int N);
 
     /**
      * Method to fill a triplet used to create a sparse matrix.
@@ -210,7 +158,7 @@ private:
      * @param width Number of columns to fill.
      */
     template <class T>
-    static void fillSpBlock(std::vector<Eigen::Triplet<double>> &tripletList,
+    static void fillSpBlock(std::vector<Eigen::Triplet<float>> &tripletList,
                             const T &block, int row, int col, int height, int width);
 };
 
